@@ -1,107 +1,87 @@
-from flask import Flask, request, send_file, render_template_string
+import streamlit as st
 from ultralytics import YOLO
 import cv2
 import os
 import uuid
+import tempfile
 import traceback
 
-app = Flask(__name__)
+# ---------- LOAD MODEL ----------
+model = YOLO("yolov8n.pt")
 
-model = YOLO('yolov8n.pt')
+st.set_page_config(page_title="Vehicle Detection", layout="centered")
+st.title("🚗 YOLOv8 Vehicle Detection")
 
+# ---------- FOLDERS ----------
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-HTML_PAGE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Vehicle Detection</title>
-    <style>
-        body {background:#0f2027;color:white;font-family:Arial;text-align:center;padding:40px;}
-        .box {background:rgba(255,255,255,0.1);padding:30px;border-radius:15px;width:60%;margin:auto;}
-        input, button {padding:12px;margin:10px;width:70%;font-size:16px;}
-        button {background:#00ffcc;border:none;font-weight:bold;cursor:pointer;}
-        a {color:yellow;font-size:20px;text-decoration:none;}
-    </style>
-</head>
-<body>
-<div class="box">
-<h1>🚗 YOLOv8 Vehicle Detection</h1>
-<form method="POST" action="/process" enctype="multipart/form-data">
-<input type="file" name="video" required><br>
-<button type="submit">Process Video</button>
-</form>
-{% if error %}
-<p style="color:red;">{{ error }}</p>
-{% endif %}
-{% if download_link %}
-<h3>✅ Processing complete</h3>
-<a href="{{ download_link }}">Download Video</a>
-{% endif %}
-</div>
-</body>
-</html>
-"""
+# ---------- FILE UPLOAD ----------
+uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
 
-@app.route("/", methods=["GET"])
-def index():
-    return render_template_string(HTML_PAGE)
+if uploaded_file:
+    if st.button("Process Video"):
 
-@app.route("/process", methods=["POST"])
-def process_video():
-    try:
-        file = request.files.get("video")
-        if not file:
-            return render_template_string(HTML_PAGE, error="No file uploaded")
+        try:
+            # Save uploaded file
+            input_name = str(uuid.uuid4()) + ".mp4"
+            input_path = os.path.join(UPLOAD_FOLDER, input_name)
 
-        input_name = str(uuid.uuid4()) + ".mp4"
-        input_path = os.path.join(UPLOAD_FOLDER, input_name)
-        file.save(input_path)
+            with open(input_path, "wb") as f:
+                f.write(uploaded_file.read())
 
-        output_name = "output_" + input_name
-        output_path = os.path.join(OUTPUT_FOLDER, output_name)
+            # Output file
+            output_name = "output_" + input_name
+            output_path = os.path.join(OUTPUT_FOLDER, output_name)
 
-        cap = cv2.VideoCapture(input_path)
-        if not cap.isOpened():
-            return render_template_string(HTML_PAGE, error="Cannot read video file")
+            cap = cv2.VideoCapture(input_path)
+            if not cap.isOpened():
+                st.error("Cannot read video file")
+                st.stop()
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25
 
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-        frame_limit = 500   # ✅ safety limit to avoid crash
+            frame_limit = 500
 
-        count = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret or count > frame_limit:
-                break
+            count = 0
+            progress = st.progress(0)
 
-            result = model(frame, verbose=False)
-            frame = result[0].plot()
-            out.write(frame)
+            while True:
+                ret, frame = cap.read()
+                if not ret or count > frame_limit:
+                    break
 
-            count += 1
+                result = model(frame, verbose=False)
+                frame = result[0].plot()
+                out.write(frame)
 
-        cap.release()
-        out.release()
+                count += 1
+                progress.progress(min(count / frame_limit, 1.0))
 
-        return render_template_string(HTML_PAGE, download_link=f"/download/{output_name}")
+            cap.release()
+            out.release()
 
-    except Exception as e:
-        print(traceback.format_exc())
-        return render_template_string(HTML_PAGE, error=str(e))
+            st.success("✅ Processing complete!")
 
-@app.route("/download/<filename>")
-def download(filename):
-    path = os.path.join(OUTPUT_FOLDER, filename)
-    return send_file(path, as_attachment=True)
+            # Display Video
+            st.video(output_path)
 
-if __name__ == "__main__":
-    app.run(debug=True, threaded=True)
+            # Download Button
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    label="📥 Download Video",
+                    data=f,
+                    file_name=output_name,
+                    mime="video/mp4"
+                )
+
+        except Exception as e:
+            st.error("❌ Error occurred")
+            st.text(traceback.format_exc())
