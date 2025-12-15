@@ -10,7 +10,7 @@ st.set_page_config(page_title="Vehicle Counting", layout="wide")
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
-MODEL_PATH = "best.pt"   # ⬅ model must be in repo
+MODEL_PATH = "best.pt"   # model must be in repo
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -26,7 +26,7 @@ model = load_model()
 class_names = model.names
 
 # =====================================
-# PROCESS VIDEO
+# PROCESS VIDEO (STREAMLIT SAFE)
 # =====================================
 def process_video(input_path, output_path):
     cap = cv2.VideoCapture(input_path)
@@ -44,9 +44,8 @@ def process_video(input_path, output_path):
 
     line_y = int(h * 0.55)
     counts = {name: 0 for name in class_names.values()}
-    counted_ids = set()
 
-    frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     progress = st.progress(0)
     frame_no = 0
 
@@ -55,44 +54,48 @@ def process_video(input_path, output_path):
         if not ret:
             break
 
-        results = model.track(
+        # ✅ STREAMLIT SAFE (NO TRACKING)
+        results = model.predict(
             frame,
-            persist=True,
             conf=0.25,
-            tracker="bytetrack.yaml"
+            iou=0.5,
+            verbose=False
         )
 
-        cv2.line(frame, (50, line_y), (w-50, line_y), (0,0,255), 3)
+        cv2.line(frame, (50, line_y), (w-50, line_y), (0, 0, 255), 3)
 
-        if results[0].boxes.id is not None:
-            for box, tid, cls in zip(
-                results[0].boxes.xyxy.cpu().numpy(),
-                results[0].boxes.id.cpu().numpy(),
-                results[0].boxes.cls.cpu().numpy()
-            ):
+        if results[0].boxes is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            clss  = results[0].boxes.cls.cpu().numpy()
+
+            for box, cls in zip(boxes, clss):
                 x1, y1, x2, y2 = map(int, box)
-                cx, cy = (x1+x2)//2, (y1+y2)//2
-                cls = int(cls)
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
 
-                if cls not in class_names:
+                cls_id = int(cls)
+                if cls_id not in class_names:
                     continue
 
-                name = class_names[cls]
-                cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                name = class_names[cls_id]
 
-                if abs(cy-line_y) < 4 and tid not in counted_ids:
+                cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+                cv2.circle(frame, (cx,cy), 4, (255,0,0), -1)
+
+                # Line crossing count
+                if abs(cy - line_y) < 4:
                     counts[name] += 1
-                    counted_ids.add(tid)
 
+        # Display counts
         y = 30
-        for k,v in counts.items():
-            cv2.putText(frame,f"{k}:{v}",(20,y),
-                        cv2.FONT_HERSHEY_SIMPLEX,0.7,(255,255,0),2)
+        for k, v in counts.items():
+            cv2.putText(frame, f"{k}: {v}", (20, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
             y += 25
 
         out.write(frame)
         frame_no += 1
-        progress.progress(frame_no/frame_total)
+        progress.progress(frame_no / total_frames)
 
     cap.release()
     out.release()
@@ -102,9 +105,12 @@ def process_video(input_path, output_path):
 # =====================================
 # UI
 # =====================================
-st.title("🚗 Vehicle Counting System")
+st.title("🚗 Vehicle Counting System (Streamlit Cloud Ready)")
 
-video = st.file_uploader("Upload Traffic Video", type=["mp4","avi","mov"])
+video = st.file_uploader(
+    "Upload Traffic Video",
+    type=["mp4", "avi", "mov"]
+)
 
 if video:
     in_path = os.path.join(UPLOAD_FOLDER, video.name)
@@ -114,17 +120,20 @@ if video:
         f.write(video.read())
 
     if st.button("▶ Process Video"):
-        counts = process_video(in_path, out_path)
+        with st.spinner("Processing video..."):
+            counts = process_video(in_path, out_path)
 
+        st.success("Processing complete ✅")
         st.video(out_path)
-        st.subheader("Vehicle Counts")
-        for k,v in counts.items():
+
+        st.subheader("📊 Vehicle Counts")
+        for k, v in counts.items():
             st.write(f"**{k}**: {v}")
 
-        with open(out_path,"rb") as f:
+        with open(out_path, "rb") as f:
             st.download_button(
                 "⬇ Download Result Video",
                 f,
-                "vehicle_counted.mp4",
-                "video/mp4"
+                file_name="vehicle_counted.mp4",
+                mime="video/mp4"
             )
