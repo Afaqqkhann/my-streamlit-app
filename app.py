@@ -2,86 +2,129 @@ import streamlit as st
 from ultralytics import YOLO
 import cv2
 import os
-import uuid
-import tempfile
-import traceback
 
-# ---------- LOAD MODEL ----------
-model = YOLO("yolov8n.pt")
+# =====================================
+# STREAMLIT CONFIG
+# =====================================
+st.set_page_config(page_title="Vehicle Counting", layout="wide")
 
-st.set_page_config(page_title="Vehicle Detection", layout="centered")
-st.title("🚗 YOLOv8 Vehicle Detection")
-
-# ---------- FOLDERS ----------
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
+MODEL_PATH = "best.pt"   # ⬅ model must be in repo
+
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# ---------- FILE UPLOAD ----------
-uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
+# =====================================
+# LOAD MODEL
+# =====================================
+@st.cache_resource
+def load_model():
+    return YOLO(MODEL_PATH)
 
-if uploaded_file:
-    if st.button("Process Video"):
+model = load_model()
+class_names = model.names
 
-        try:
-            # Save uploaded file
-            input_name = str(uuid.uuid4()) + ".mp4"
-            input_path = os.path.join(UPLOAD_FOLDER, input_name)
+# =====================================
+# PROCESS VIDEO
+# =====================================
+def process_video(input_path, output_path):
+    cap = cv2.VideoCapture(input_path)
 
-            with open(input_path, "wb") as f:
-                f.write(uploaded_file.read())
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
 
-            # Output file
-            output_name = "output_" + input_name
-            output_path = os.path.join(OUTPUT_FOLDER, output_name)
+    out = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (w, h)
+    )
 
-            cap = cv2.VideoCapture(input_path)
-            if not cap.isOpened():
-                st.error("Cannot read video file")
-                st.stop()
+    line_y = int(h * 0.55)
+    counts = {name: 0 for name in class_names.values()}
+    counted_ids = set()
 
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    progress = st.progress(0)
+    frame_no = 0
 
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-            frame_limit = 500
+        results = model.track(
+            frame,
+            persist=True,
+            conf=0.25,
+            tracker="bytetrack.yaml"
+        )
 
-            count = 0
-            progress = st.progress(0)
+        cv2.line(frame, (50, line_y), (w-50, line_y), (0,0,255), 3)
 
-            while True:
-                ret, frame = cap.read()
-                if not ret or count > frame_limit:
-                    break
+        if results[0].boxes.id is not None:
+            for box, tid, cls in zip(
+                results[0].boxes.xyxy.cpu().numpy(),
+                results[0].boxes.id.cpu().numpy(),
+                results[0].boxes.cls.cpu().numpy()
+            ):
+                x1, y1, x2, y2 = map(int, box)
+                cx, cy = (x1+x2)//2, (y1+y2)//2
+                cls = int(cls)
 
-                result = model(frame, verbose=False)
-                frame = result[0].plot()
-                out.write(frame)
+                if cls not in class_names:
+                    continue
 
-                count += 1
-                progress.progress(min(count / frame_limit, 1.0))
+                name = class_names[cls]
+                cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
 
-            cap.release()
-            out.release()
+                if abs(cy-line_y) < 4 and tid not in counted_ids:
+                    counts[name] += 1
+                    counted_ids.add(tid)
 
-            st.success("✅ Processing complete!")
+        y = 30
+        for k,v in counts.items():
+            cv2.putText(frame,f"{k}:{v}",(20,y),
+                        cv2.FONT_HERSHEY_SIMPLEX,0.7,(255,255,0),2)
+            y += 25
 
-            # Display Video
-            st.video(output_path)
+        out.write(frame)
+        frame_no += 1
+        progress.progress(frame_no/frame_total)
 
-            # Download Button
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    label="📥 Download Video",
-                    data=f,
-                    file_name=output_name,
-                    mime="video/mp4"
-                )
+    cap.release()
+    out.release()
+    progress.empty()
+    return counts
 
-        except Exception as e:
-            st.error("❌ Error occurred")
-            st.text(traceback.format_exc())
+# =====================================
+# UI
+# =====================================
+st.title("🚗 Vehicle Counting System")
+
+video = st.file_uploader("Upload Traffic Video", type=["mp4","avi","mov"])
+
+if video:
+    in_path = os.path.join(UPLOAD_FOLDER, video.name)
+    out_path = os.path.join(OUTPUT_FOLDER, "processed_" + video.name)
+
+    with open(in_path, "wb") as f:
+        f.write(video.read())
+
+    if st.button("▶ Process Video"):
+        counts = process_video(in_path, out_path)
+
+        st.video(out_path)
+        st.subheader("Vehicle Counts")
+        for k,v in counts.items():
+            st.write(f"**{k}**: {v}")
+
+        with open(out_path,"rb") as f:
+            st.download_button(
+                "⬇ Download Result Video",
+                f,
+                "vehicle_counted.mp4",
+                "video/mp4"
+            )
