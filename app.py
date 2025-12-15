@@ -2,6 +2,8 @@ import streamlit as st
 from ultralytics import YOLO
 import cv2
 import os
+import numpy as np
+from collections import deque
 
 # =====================================
 # STREAMLIT CONFIG
@@ -10,7 +12,7 @@ st.set_page_config(page_title="Vehicle Counting", layout="wide")
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
-MODEL_PATH = "best.pt"   # model must be in repo
+MODEL_PATH = "best.pt"  # your trained model
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -26,7 +28,7 @@ model = load_model()
 class_names = model.names
 
 # =====================================
-# PROCESS VIDEO (STREAMLIT SAFE)
+# PROCESS VIDEO WITH TRACKING
 # =====================================
 def process_video(input_path, output_path):
     cap = cv2.VideoCapture(input_path)
@@ -45,6 +47,13 @@ def process_video(input_path, output_path):
     line_y = int(h * 0.55)
     counts = {name: 0 for name in class_names.values()}
 
+    # tracker storage: {track_id: (cx, cy, counted)}
+    trackers = {}
+    max_disappeared = 5  # frames before forgetting a tracker
+    disappeared = {}
+
+    track_id_counter = 0
+
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     progress = st.progress(0)
     frame_no = 0
@@ -54,44 +63,56 @@ def process_video(input_path, output_path):
         if not ret:
             break
 
-        # ✅ STREAMLIT SAFE (NO TRACKING)
-        results = model.predict(
-            frame,
-            conf=0.25,
-            iou=0.5,
-            verbose=False
-        )
+        results = model.predict(frame, conf=0.25, iou=0.5, verbose=False)
 
-        cv2.line(frame, (50, line_y), (w-50, line_y), (0, 0, 255), 3)
-
+        detections = []
         if results[0].boxes is not None:
             boxes = results[0].boxes.xyxy.cpu().numpy()
             clss  = results[0].boxes.cls.cpu().numpy()
-
             for box, cls in zip(boxes, clss):
-                x1, y1, x2, y2 = map(int, box)
-                cx = (x1 + x2) // 2
-                cy = (y1 + y2) // 2
-
                 cls_id = int(cls)
                 if cls_id not in class_names:
                     continue
+                x1, y1, x2, y2 = map(int, box)
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+                detections.append((cx, cy, cls_id, (x1, y1, x2, y2)))
 
-                name = class_names[cls_id]
+        # simple distance-based tracker
+        new_trackers = {}
+        for det in detections:
+            cx, cy, cls_id, box = det
+            matched = False
+            for tid, (tcx, tcy, tcls, counted) in trackers.items():
+                if tcls == cls_id and np.hypot(cx - tcx, cy - tcy) < 50:
+                    new_trackers[tid] = (cx, cy, cls_id, counted)
+                    matched = True
+                    if not counted and abs(cy - line_y) < 4:
+                        counts[class_names[cls_id]] += 1
+                        new_trackers[tid] = (cx, cy, cls_id, True)
+                    break
+            if not matched:
+                track_id_counter += 1
+                counted = abs(cy - line_y) < 4
+                if counted:
+                    counts[class_names[cls_id]] += 1
+                new_trackers[track_id_counter] = (cx, cy, cls_id, counted)
 
-                cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
-                cv2.circle(frame, (cx,cy), 4, (255,0,0), -1)
+        trackers = new_trackers
 
-                # Line crossing count
-                if abs(cy - line_y) < 4:
-                    counts[name] += 1
+        # draw
+        cv2.line(frame, (50, line_y), (w-50, line_y), (0,0,255), 3)
+        for cx, cy, cls_id, counted in trackers.values():
+            cv2.circle(frame, (cx, cy), 4, (255,0,0), -1)
+        for det in detections:
+            x1, y1, x2, y2 = det[3]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
 
-        # Display counts
-        y = 30
+        y_text = 30
         for k, v in counts.items():
-            cv2.putText(frame, f"{k}: {v}", (20, y),
+            cv2.putText(frame, f"{k}: {v}", (20, y_text),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-            y += 25
+            y_text += 25
 
         out.write(frame)
         frame_no += 1
@@ -105,12 +126,9 @@ def process_video(input_path, output_path):
 # =====================================
 # UI
 # =====================================
-st.title("🚗 Vehicle Counting System (Streamlit Cloud Ready)")
+st.title("🚗 Vehicle Counting System (Perfect Count)")
 
-video = st.file_uploader(
-    "Upload Traffic Video",
-    type=["mp4", "avi", "mov"]
-)
+video = st.file_uploader("Upload Traffic Video", type=["mp4", "avi", "mov"])
 
 if video:
     in_path = os.path.join(UPLOAD_FOLDER, video.name)
